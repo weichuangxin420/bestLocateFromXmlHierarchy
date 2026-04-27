@@ -15,59 +15,58 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Read an Android UIAutomator hierarchy XML and return the best locator
- * for any given node.
+ * 读取 Android UIAutomator 层级 XML，对任意节点返回最佳定位器。
  *
- * <p>The algorithm is a port of the {@code suggest_xpath()} +
- * {@code resolveLocatorByPriorityFast()} flow from uiautodev.</p>
+ * <p>算法源自 uiautodev 的 {@code suggest_xpath()} +
+ * {@code resolveLocatorByPriorityFast()} 流程。</p>
  *
- * <h3>Algorithm overview</h3>
+ * <h3>算法概览</h3>
  * <ol>
- *   <li><b>XML → hierarchy tree</b> — parse DOM, assign DFS sibling-index keys</li>
- *   <li><b>Tree → flat index</b> — pre-order traversal + 4 property inverted indexes</li>
- *   <li><b>suggest_xpath()</b> — generate simple + complex XPath candidates,
- *       sorted by uniqueness (match count ascending)</li>
- *   <li><b>resolvePriorityFast()</b> — first match wins:
+ *   <li><b>XML → 层级树</b> — 解析 DOM，分配 DFS 兄弟索引 key</li>
+ *   <li><b>树 → 扁平索引</b> — 前序遍历 + 4 个属性倒排索引</li>
+ *   <li><b>suggest_xpath()</b> — 生成简单 + 复杂 XPath 候选，
+ *       按唯一性排序（匹配数升序）</li>
+ *   <li><b>resolvePriorityFast()</b> — 优先级链首个命中：
  *       content-desc → resource-id → text → class-text →
  *       class-content-desc → class → xpath</li>
  * </ol>
  *
- * <h3>Usage</h3>
+ * <h3>用法</h3>
  * <pre>{@code
  *   BestLocator bl = new BestLocator(xmlString);
  *   LocatorResult result = bl.bestLocate("0-0-0-1-0-2");
  *   // result.getType()  → "content_desc" | "resource_id" | "text" | "xpath"
- *   // result.getValue() → actual locator value
+ *   // result.getValue() → 实际的定位值
  * }</pre>
  */
 public class BestLocator {
 
-    // Regex patterns compiled once for performance.
+    // 正则表达式，编译一次全局复用。
     private static final Pattern BOUNDS_PATTERN = Pattern.compile("\\d+");
     private static final Pattern XML_BOUNDS_PATTERN =
             Pattern.compile("\\[(\\d+),(\\d+)\\]\\[(\\d+),(\\d+)\\]");
 
-    // ---- strategy names (internal, used for sorting and priority comparison) ----
+    // ---- 策略名（内部使用，用于排序和优先级比较） ----
     private static final String STRATEGY_CONTENT_DESC = "contentDesc";
     private static final String STRATEGY_RESOURCE_ID = "resourceId";
     private static final String STRATEGY_TEXT = "text";
     private static final String STRATEGY_CLASS_TEXT = "classText";
     private static final String STRATEGY_CLASS_CONTENT_DESC = "classContentDesc";
     private static final String STRATEGY_CLASS = "class";
-    /** Fallback for complex candidates. */
+    /** 复杂候选的兜底策略。 */
     private static final String STRATEGY_XPATH = "xpath";
 
-    // ---- output locator types (returned in LocatorResult.type) ----
-    /** Accessibility ID / content-desc — fastest and most stable. */
+    // ---- 输出定位器类型（返回到 LocatorResult.type） ----
+    /** Accessibility ID / content-desc — 最快最稳定。 */
     private static final String TYPE_CONTENT_DESC = "content_desc";
-    /** Resource ID — unique and fast (~35ms in Appium). */
+    /** Resource ID — 速度快且唯一（Appium 基准 ~35ms）。 */
     private static final String TYPE_RESOURCE_ID = "resource_id";
-    /** Text content — may change with i18n. */
+    /** 文本内容 — 快速但可能随多语言变化。 */
     private static final String TYPE_TEXT = "text";
-    /** XPath — slow (~120ms) and brittle, used as last resort. */
+    /** XPath — 慢（~120ms）且脆弱，仅作最后手段。 */
     private static final String TYPE_XPATH = "xpath";
 
-    // ---- internal "by" types (keys used by matchesBy / buildXpathExpr) ----
+    // ---- 内部 "by" 类型（matchesBy / buildXpathExpr 使用的 key） ----
     private static final String BY_ID = "id";
     private static final String BY_TEXT = "text";
     private static final String BY_CONTENT_DESC = "content-desc";
@@ -76,22 +75,22 @@ public class BestLocator {
     private static final String BY_CLASS_CONTENT_DESC = "class_and_content_desc";
 
     // ================================================================
-    //  Instance state — built once during construction
+    //  实例状态 — 构造时一次性构建
     // ================================================================
 
-    /** Root of the parsed hierarchy tree. */
+    /** 解析后的层级树根节点。 */
     private HierarchyNode root;
-    /** Key → node map for O(1) node lookup. */
+    /** key → node 映射表，O(1) 查找。 */
     private Map<String, HierarchyNode> nodeMap;
-    /** All nodes in pre-order (flat list for iteration). */
+    /** 前序遍历的全部节点（扁平列表）。 */
     private List<HierarchyNode> allNodes;
-    /** Cached preferred XPath, used as fallback in bestLocate(). */
+    /** 缓存的首选 XPath，用作 bestLocate() 的兜底。 */
     private String preferredXpath;
 
     /**
-     * Property inverted indexes — built during buildIndex() for O(1)
-     * property lookup in matchesBy(). Each maps a property value to
-     * the list of nodes having that value.
+     * 属性倒排索引 — 在 buildIndex() 中构建，
+     * 使 matchesBy() 实现 O(1) 属性查找。
+     * 每个索引将属性值映射到拥有该值的节点列表。
      */
     private Map<String, List<HierarchyNode>> byRid = new HashMap<>();
     private Map<String, List<HierarchyNode>> byText = new HashMap<>();
@@ -99,13 +98,13 @@ public class BestLocator {
     private Map<String, List<HierarchyNode>> byClass = new HashMap<>();
 
     // ================================================================
-    //  Construction
+    //  构造方法
     // ================================================================
 
     /**
-     * Parse an XML string into the hierarchy, then build all indexes.
+     * 将 XML 字符串解析为层级树，然后构建全部索引。
      *
-     * @param xmlData raw UIAutomator dump XML string
+     * @param xmlData 原始 UIAutomator dump XML 字符串
      */
     public BestLocator(String xmlData) {
         int[] size = inferSize(xmlData);
@@ -114,39 +113,39 @@ public class BestLocator {
     }
 
     /**
-     * Convenience: load XML from a file path.
+     * 便捷方法：从文件路径加载 XML。
      *
-     * @param path filesystem path to the hierarchy XML file
-     * @return a fully initialized BestLocator instance
-     * @throws Exception if the file cannot be read
+     * @param path 层级 XML 文件路径
+     * @return 完全初始化好的 BestLocator 实例
+     * @throws Exception 文件读取失败时抛出
      */
     public static BestLocator fromFile(String path) throws Exception {
         return new BestLocator(new String(Files.readAllBytes(Paths.get(path)), "UTF-8"));
     }
 
     // ================================================================
-    //  Public API
+    //  公开 API
     // ================================================================
 
     /**
-     * Return the best locator (type + value) for the given node key.
+     * 对给定节点 key 返回最佳定位器 (type + value)。
      *
-     * <p>This is the main entry point. It runs the full algorithm:</p>
+     * <p>这是主入口方法，完整执行算法流程:</p>
      * <ol>
-     *   <li>Look up the target node by key (O(1))</li>
-     *   <li>suggestXpath() → generate all candidates</li>
-     *   <li>resolvePriorityFast() → pick the first matching candidate
-     *       by fixed priority: content-desc → resource-id → text →
+     *   <li>通过 key 查找目标节点 (O(1))</li>
+     *   <li>suggestXpath() → 生成所有候选</li>
+     *   <li>resolvePriorityFast() → 按固定优先级链选取首个命中:
+     *       content-desc → resource-id → text →
      *       class-text → class-content-desc → class → xpath</li>
      * </ol>
      *
-     * <p>The priority order matches the industry consensus:
-     * content-desc and resource-id are fastest and most stable (~35ms),
-     * while XPath is slow (~120ms) and brittle — used only as fallback.</p>
+     * <p>优先级顺序遵循行业共识:
+     * content-desc 和 resource-id 最快最稳定（~35ms），
+     * XPath 慢且脆弱（~120ms），仅作最后手段。</p>
      *
-     * @param key the node key (e.g. "0-0-1-2")
-     * @return the best locator, never null
-     * @throws IllegalArgumentException if the key is not found
+     * @param key 节点 key（如 "0-0-1-2"）
+     * @return 最佳定位器，永不为 null
+     * @throws IllegalArgumentException key 未找到时抛出
      */
     public LocatorResult bestLocate(String key) {
         HierarchyNode target = nodeMap.get(key);
@@ -154,12 +153,11 @@ public class BestLocator {
             throw new IllegalArgumentException("node key not found: " + key);
         }
 
-        // Phase 3: generate all candidates.
+        // 阶段3: 生成所有候选。
         List<XPathCandidate> candidates = suggestXpath(target);
 
-        // Phase 4: resolveLocatorByPriorityFast().
-        // Fixed priority chain — first candidate with a non-empty
-        // propertyValue wins.
+        // 阶段4: resolveLocatorByPriorityFast()。
+        // 固定优先级链 — 首个 propertyValue 非空的候选即胜出。
         String[] priorityOrder = {
                 STRATEGY_CONTENT_DESC, STRATEGY_RESOURCE_ID, STRATEGY_TEXT,
                 STRATEGY_CLASS_TEXT, STRATEGY_CLASS_CONTENT_DESC, STRATEGY_CLASS
@@ -173,21 +171,21 @@ public class BestLocator {
             }
         }
 
-        // Fallback 1: preferred XPath (the most unique simple strategy).
+        // 兜底1: 首选 XPath（最唯一的简单策略）。
         if (!preferredXpath.isEmpty()) {
             return new LocatorResult(TYPE_XPATH, preferredXpath);
         }
 
-        // Fallback 2: absolute last resort.
+        // 兜底2: 最后的最后。
         String xpath = candidates.isEmpty() ? "" : candidates.get(0).xpath;
         return new LocatorResult(TYPE_XPATH, xpath);
     }
 
     /**
-     * Return all candidates for debugging / inspection.
+     * 返回全部候选列表，用于调试 / 检查。
      *
-     * @param key the node key
-     * @return full list of XPath candidates including complex ones
+     * @param key 节点 key
+     * @return 包含复杂候选在内的完整 XPath 候选列表
      */
     public List<XPathCandidate> getAllCandidates(String key) {
         HierarchyNode target = nodeMap.get(key);
@@ -197,22 +195,22 @@ public class BestLocator {
         return suggestXpath(target);
     }
 
-    /** @return root of the parsed hierarchy tree */
+    /** @return 解析后的层级树根节点 */
     public HierarchyNode getRoot() { return root; }
 
-    /** @return key → node lookup map */
+    /** @return key → node 查找映射表 */
     public Map<String, HierarchyNode> getNodeMap() { return nodeMap; }
 
-    /** @return all nodes in pre-order */
+    /** @return 前序遍历的全部节点 */
     public List<HierarchyNode> getAllNodes() { return allNodes; }
 
     // ================================================================
-    //  Phase 1: XML → HierarchyNode tree
+    //  阶段1: XML → HierarchyNode 树
     // ================================================================
 
     /**
-     * Infer screen resolution from the maximum bounds values in the XML.
-     * Scans all {@code [x1,y1][x2,y2]} patterns and returns (maxX, maxY).
+     * 从 XML 中推断屏幕分辨率（扫描所有 bounds 取最大值）。
+     * 扫描所有 {@code [x1,y1][x2,y2]} 格式的 bounds，返回 (maxX, maxY)。
      */
     private static int[] inferSize(String xml) {
         int maxX = 1, maxY = 1;
@@ -225,8 +223,8 @@ public class BestLocator {
     }
 
     /**
-     * Parse the complete XML string into a HierarchyNode tree.
-     * Uses DOM parser with secure feature flags (no external entities).
+     * 将完整 XML 字符串解析为 HierarchyNode 树。
+     * 使用 DOM 解析器并启用安全特性标志（禁用外部实体）。
      */
     private static HierarchyNode parseHierarchy(String xml, int width, int height) {
         try {
@@ -236,7 +234,7 @@ public class BestLocator {
             f.setFeature("http://xml.org/sax/features/external-general-entities", false);
             f.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
             Document doc = f.newDocumentBuilder().parse(new InputSource(new StringReader(xml)));
-            // Root is the <hierarchy> element; first child is the first <node>.
+            // 根元素是 <hierarchy>；第一个子元素是第一个 <node>。
             return parseElement(doc.getDocumentElement(), width, height,
                     new ArrayList<>(Collections.singletonList(0)));
         } catch (Exception e) {
@@ -245,14 +243,13 @@ public class BestLocator {
     }
 
     /**
-     * Recursively parse one DOM element into a HierarchyNode.
+     * 递归将一个 DOM 元素解析为 HierarchyNode。
      *
-     * <p><b>Key generation:</b> each node's key is its DFS path of sibling
-     * indices, e.g. root="0", first child="0-0", second child's third="0-1-2".</p>
+     * <p><b>Key 生成规则:</b> 每个节点的 key 是其 DFS 兄弟索引路径，
+     * 如 root="0", 第一个子="0-0", 第二个子的第三个="0-1-2"。</p>
      *
-     * <p><b>Bounds normalization:</b> pixel bounds [x1,y1][x2,y2] are divided
-     * by screen dimensions to produce 0~1 range values, making them
-     * resolution-independent.</p>
+     * <p><b>Bounds 归一化:</b> 像素 bounds [x1,y1][x2,y2] 除以屏幕尺寸，
+     * 转为 0~1 范围的值，使其与分辨率无关。</p>
      */
     private static HierarchyNode parseElement(Element el, int width, int height,
                                                List<Integer> indexes) {
@@ -261,23 +258,23 @@ public class BestLocator {
         node.setName(resolveNodeName(el));
         node.setProperties(readProperties(el));
 
-        // Parse and normalize bounds from "[x1,y1][x2,y2]" format.
+        // 解析 "[x1,y1][x2,y2]" 格式的 bounds 并做归一化。
         String bv = el.getAttribute("bounds");
         if (bv != null && !bv.isEmpty()) {
             List<Integer> bounds = parseBounds(bv);
             if (bounds.size() == 4) {
                 int x1 = bounds.get(0), y1 = bounds.get(1),
                     x2 = bounds.get(2), y2 = bounds.get(3);
-                // rect = pixel coordinates (for frontend overlay drawing).
+                // rect = 像素坐标（供前端 overlay 绘制）。
                 node.setRect(new HierarchyRect(x1, y1, x2 - x1, y2 - y1));
-                // bounds = normalized 0~1 range (for coordinate matching).
+                // bounds = 归一化 0~1 范围（供坐标匹配）。
                 node.setBounds(Arrays.asList(
                         roundNorm(x1, width), roundNorm(y1, height),
                         roundNorm(x2, width), roundNorm(y2, height)));
             }
         }
 
-        // Recursively parse child <node> elements only (skip text/#text nodes).
+        // 仅递归解析子 <node> 元素（跳过 #text 等节点）。
         NodeList children = el.getChildNodes();
         int childIdx = 0;
         for (int i = 0; i < children.getLength(); i++) {
@@ -292,22 +289,22 @@ public class BestLocator {
     }
 
     // ================================================================
-    //  Phase 2: Index building
+    //  阶段2: 索引构建
     // ================================================================
 
     /**
-     * Flatten the tree via pre-order traversal and build 4 inverted
-     * indexes for O(1) property lookup in matchesBy().
+     * 前序遍历展平树，同时建立 4 个倒排索引，
+     * 使 matchesBy() 实现 O(1) 属性查找。
      *
-     * <p>Indexes built:</p>
+     * <p>建立的索引:</p>
      * <ul>
-     *   <li>{@code byRid}   — resource-id value → matching nodes</li>
-     *   <li>{@code byText}  — text value → matching nodes</li>
-     *   <li>{@code byCd}    — content-desc value → matching nodes</li>
-     *   <li>{@code byClass} — class name → matching nodes</li>
+     *   <li>{@code byRid}   — resource-id 值 → 匹配节点列表</li>
+     *   <li>{@code byText}  — text 值 → 匹配节点列表</li>
+     *   <li>{@code byCd}    — content-desc 值 → 匹配节点列表</li>
+     *   <li>{@code byClass} — class 名称 → 匹配节点列表</li>
      * </ul>
      *
-     * <p>Only non-empty property values are indexed.</p>
+     * <p>仅索引非空的属性值。</p>
      */
     private void buildIndex() {
         nodeMap = new LinkedHashMap<>();
@@ -320,17 +317,17 @@ public class BestLocator {
     }
 
     /**
-     * Recursive helper for buildIndex() — populates nodeMap, allNodes,
-     * and all 4 property inverted indexes.
+     * buildIndex() 的递归辅助方法 — 填充 nodeMap、allNodes
+     * 及全部 4 个属性倒排索引。
      */
     private void indexRecursive(HierarchyNode node) {
         if (node == null) return;
 
-        // Standard index: key → node, flat list.
+        // 标准索引: key → node，扁平列表。
         nodeMap.put(node.getKey(), node);
         allNodes.add(node);
 
-        // Property inverted indexes: populate all 4 maps.
+        // 属性倒排索引: 填充全部 4 个映射表。
         Map<String, String> p = node.getProperties();
         String rid = p.get("resource-id");
         String text = p.get("text");
@@ -345,7 +342,7 @@ public class BestLocator {
         if (hasText(cd)) {
             byCd.computeIfAbsent(cd, k -> new ArrayList<>()).add(node);
         }
-        // class name is always present (derived from XML tag or class attr).
+        // class 名称始终存在（从 XML tag 或 class 属性派生）。
         byClass.computeIfAbsent(node.getName(), k -> new ArrayList<>()).add(node);
 
         if (node.getChildren() != null) {
@@ -356,45 +353,42 @@ public class BestLocator {
     }
 
     // ================================================================
-    //  Phase 3: suggestXpath() — main entry
+    //  阶段3: suggestXpath() — 主入口
     // ================================================================
 
     /**
-     * Generate all locator candidates for the given node.
+     * 为给定节点生成所有定位候选。
      *
-     * <p>Steps:</p>
+     * <p>步骤:</p>
      * <ol>
-     *   <li>getAnchorByCandidates() — determine applicable strategies based
-     *       on which properties the target node has.</li>
-     *   <li>Sort strategies by match count ascending — fewer matches
-     *       = more unique.</li>
-     *   <li>For each strategy, build the XPath expression, count matches,
-     *       and create a candidate.</li>
-     *   <li>buildComplexCandidates() — generate parent-anchored and
-     *       sibling-anchored XPath candidates for cases where simple
-     *       strategies are not unique.</li>
+     *   <li>getAnchorByCandidates() — 根据目标节点具有哪些属性，
+     *       决定哪些定位策略适用。</li>
+     *   <li>按匹配数升序排列策略 — 匹配越少 = 越唯一。</li>
+     *   <li>对每个策略，构建 XPath 表达式，统计匹配数，生成候选。</li>
+     *   <li>buildComplexCandidates() — 生成父级锚定和同级锚定的
+     *       XPath 候选，用于简单策略不够唯一的场景。</li>
      * </ol>
      *
-     * @param selected the target node
-     * @return all candidates, sorted by strategy preference
+     * @param selected 目标节点
+     * @return 全部候选，按策略优先级排序
      */
     private List<XPathCandidate> suggestXpath(HierarchyNode selected) {
-        // Step 1 & 2: get candidates, sort by match count (fewer = better).
+        // 步骤 1 & 2: 获取候选策略，按匹配数升序排列（越少越好）。
         List<String> byCandidates = getAnchorByCandidates(selected);
         byCandidates.sort(Comparator.comparingInt(
                 by -> matchesBy(selected, by).size()));
 
-        // The first (most unique) strategy is the "preferred" one.
+        // 首个（最唯一）策略即为"首选"。
         String preferredBy = byCandidates.isEmpty() ? BY_CLASS : byCandidates.get(0);
         this.preferredXpath = buildXpathExpr(selected, preferredBy);
         List<HierarchyNode> prefMatches = matchesBy(selected, preferredBy);
         int prefIdx = indexOfNode(prefMatches, selected.getKey());
-        // If not the first match, append position index: (//expr)[n].
+        // 如果不是第一个匹配节点，追加位置索引: (//expr)[n]。
         if (!preferredXpath.isEmpty() && prefIdx > 0) {
             preferredXpath = "(" + preferredXpath + ")[" + (prefIdx + 1) + "]";
         }
 
-        // Step 3: build a candidate for each applicable strategy.
+        // 步骤 3: 为每个适用策略构建候选。
         List<XPathCandidate> candidates = new ArrayList<>();
         Set<String> seen = new HashSet<>();
 
@@ -402,7 +396,7 @@ public class BestLocator {
             List<HierarchyNode> matches = matchesBy(selected, by);
             int idx = indexOfNode(matches, selected.getKey());
             String xpath = buildXpathExpr(selected, by);
-            // Append [n] if the node is not the first match.
+            // 如果不是第一个匹配，追加位置索引 [n]。
             if (!xpath.isEmpty() && idx > 0) {
                 xpath = "(" + xpath + ")[" + (idx + 1) + "]";
             }
@@ -412,65 +406,63 @@ public class BestLocator {
             if (!xpath.isEmpty()) seen.add(xpath);
         }
 
-        // Step 4: generate complex candidates (parent/sibling anchored).
+        // 步骤 4: 生成复杂候选（父级/同级锚定）。
         candidates.addAll(buildComplexCandidates(selected, seen));
         return candidates;
     }
 
     // ================================================================
-    //  getAnchorByCandidates — determine applicable strategies
+    //  getAnchorByCandidates — 确定适用的定位策略
     // ================================================================
 
     /**
-     * Determine which locator strategies are applicable based on which
-     * properties the target node actually has.
+     * 根据目标节点实际拥有的属性，决定哪些定位策略可用。
      *
-     * <p>class is ALWAYS included as the universal fallback. Other
-     * strategies are only included if the corresponding property
-     * has a non-empty value.</p>
+     * <p>class 始终包含（通用兜底）。其他策略仅在对应属性值
+     * 非空时加入。</p>
      *
-     * <p>The order is: class, id, content-desc, text, class_and_text,
-     * class_and_content_desc — later re-sorted by match count in
-     * suggestXpath().</p>
+     * <p>顺序: class, id, content-desc, text, class_and_text,
+     * class_and_content_desc — 在 suggestXpath() 中
+     * 会按匹配数重新排序。</p>
      */
     private List<String> getAnchorByCandidates(HierarchyNode node) {
         List<String> out = new ArrayList<>();
         Map<String, String> p = node.getProperties();
 
-        out.add(BY_CLASS);                              // always present (fallback)
+        out.add(BY_CLASS);                              // 始终存在（兜底）
         if (hasText(p.get("resource-id"))) out.add(BY_ID);
         if (hasText(p.get("content-desc"))) out.add(BY_CONTENT_DESC);
         if (hasText(p.get("text"))) {
-            out.add(BY_TEXT);                           // text alone
-            out.add(BY_CLASS_TEXT);                     // class + text combination
+            out.add(BY_TEXT);                           // 纯文本
+            out.add(BY_CLASS_TEXT);                     // class + text 组合
         }
         if (hasText(p.get("content-desc")) && hasText(node.getName())) {
-            out.add(BY_CLASS_CONTENT_DESC);             // class + content-desc combo
+            out.add(BY_CLASS_CONTENT_DESC);             // class + content-desc 组合
         }
         return dedupe(out);
     }
 
     // ================================================================
-    //  matchesBy — O(1) property lookup via pre-built indexes
+    //  matchesBy — O(1) 属性查找（通过预建索引）
     // ================================================================
 
     /**
-     * Find all nodes matching the given strategy for the selected node.
+     * 查找所有与给定策略匹配的节点。
      *
-     * <p>Uses the pre-built inverted indexes (byRid, byText, byCd, byClass)
-     * for O(1) lookup instead of scanning all nodes. For combined
-     * strategies (class_and_text, class_and_content_desc), computes
-     * the set intersection of two indexes.</p>
+     * <p>使用预建的倒排索引（byRid, byText, byCd, byClass）
+     * 实现 O(1) 查找，而非扫描全部节点。对于组合策略
+     * （class_and_text, class_and_content_desc），
+     * 计算两个索引的集合交集。</p>
      *
-     * <p>This was the main performance hotspot before optimization —
-     * each call used to scan O(n) nodes. Now reduced to O(1).</p>
+     * <p>这是优化前的性能瓶颈 — 每次调用曾需扫描 O(n) 个节点。
+     * 现在已降至 O(1)。</p>
      */
     private List<HierarchyNode> matchesBy(HierarchyNode selected, String by) {
         Map<String, String> sp = selected.getProperties();
         String sName = selected.getName();
 
         switch (by) {
-            // Single-property strategies: direct O(1) map lookup.
+            // 单属性策略: 直接 O(1) 映射表查找。
             case BY_ID: {
                 String rid = sp.get("resource-id");
                 if (!hasText(rid)) return Collections.emptyList();
@@ -493,8 +485,8 @@ public class BestLocator {
                 List<HierarchyNode> v = byClass.get(sName);
                 return v != null ? v : Collections.emptyList();
             }
-            // Combined strategies: set intersection of two indexes.
-            // O(min(|A|, |B|)) — still much faster than scanning all nodes.
+            // 组合策略: 两个索引的集合交集。
+            // O(min(|A|, |B|)) — 仍远快于扫描全部节点。
             case BY_CLASS_TEXT: {
                 String text = sp.get("text");
                 if (!hasText(text)) return Collections.emptyList();
@@ -531,35 +523,35 @@ public class BestLocator {
     }
 
     // ================================================================
-    //  buildXpathExpr — construct XPath for a strategy
+    //  buildXpathExpr — 为策略构建 XPath 表达式
     // ================================================================
 
     /**
-     * Build an XPath expression for the given node and locator strategy.
+     * 为给定节点和定位策略构建 XPath 表达式。
      *
-     * <p>Single-property strategies produce simple attribute expressions:</p>
+     * <p>单属性策略生成简单的属性表达式:</p>
      * <pre>
-     *   id         → //*[@resource-id="com.example:id/btn"]
-     *   text       → //*[@text="OK"]
+     *   id          → //*[@resource-id="com.example:id/btn"]
+     *   text        → //*[@text="OK"]
      *   content-desc → //*[@content-desc="Submit"]</pre>
      *
-     * <p>Class-based strategies produce tag or class expressions:</p>
+     * <p>基于 class 的策略生成标签或 class 表达式:</p>
      * <pre>
-     *   valid XML name  → //android.widget.Button
-     *   invalid XML name → //*[@class="com.example.CustomView"]</pre>
+     *   合法 XML 名称  → //android.widget.Button
+     *   非法 XML 名称  → //*[@class="com.example.CustomView"]</pre>
      *
-     * <p>Combined strategies use predicate syntax:</p>
+     * <p>组合策略使用谓词语法:</p>
      * <pre>
      *   class+text → //android.widget.Button[@text="OK"]</pre>
      *
-     * @return the XPath string, or "" if the required property is missing
+     * @return XPath 字符串，所需属性缺失时返回 ""
      */
     private String buildXpathExpr(HierarchyNode node, String by) {
         Map<String, String> p = node.getProperties();
         String name = node.getName();
 
         switch (by) {
-            // ---- Single-property strategies ----
+            // ---- 单属性策略 ----
             case BY_ID: {
                 String rid = p.get("resource-id");
                 return hasText(rid)
@@ -576,13 +568,13 @@ public class BestLocator {
             }
             case BY_CLASS: {
                 if (!hasText(name)) return "";
-                // If the class name is a valid XML element name, use a tag
-                // selector (//Button). Otherwise use @class attribute.
+                // 如果类名是合法的 XML 元素名，使用标签选择器 (//Button)。
+                // 否则使用 @class 属性选择器。
                 return isValidXmlName(name)
                         ? "//" + name
                         : "//*[@class=" + quoteXLiteral(name) + "]";
             }
-            // ---- Combined strategies ----
+            // ---- 组合策略 ----
             case BY_CLASS_TEXT: {
                 String t = p.get("text");
                 if (!hasText(name) || !hasText(t)) return "";
@@ -605,36 +597,36 @@ public class BestLocator {
     }
 
     // ================================================================
-    //  Phase 3d: Complex XPath candidates
+    //  阶段3d: 复杂 XPath 候选
     // ================================================================
 
     /**
-     * Generate complex XPath candidates when simple ones are not unique.
+     * 当简单 XPath 不够唯一时，生成复杂 XPath 候选。
      *
-     * <h4>Type A — Parent-anchored</h4>
-     * <p>Use a parent node that DOES have a unique attribute as anchor,
-     * then specify the selected node as the n-th child.</p>
+     * <h4>类型 A — 父级锚定</h4>
+     * <p>使用具有唯一属性的父节点作锚点，
+     * 然后通过子节点索引指定目标节点。</p>
      * <pre>
      *   (//*[@resource-id="title_bar"]/*[3])
      *   (//*[@resource-id="title_bar"]/android.widget.Button)[2]</pre>
      *
-     * <h4>Type B — Sibling-anchored</h4>
-     * <p>Use a sibling node that CAN be uniquely located as a reference,
-     * then use XPath axis to reach the selected node.</p>
+     * <h4>类型 B — 同级锚定</h4>
+     * <p>使用可唯一定位的兄弟节点作参照，
+     * 通过 XPath 轴定位目标节点。</p>
      * <pre>
      *   (//*[@content-desc="back"]/following-sibling::Button)[1]</pre>
      *
-     * <p>Only called when simple strategies don't yield unique locators.</p>
+     * <p>仅在简单策略无法生成唯一定位器时才调用。</p>
      */
     private List<XPathCandidate> buildComplexCandidates(HierarchyNode selected,
                                                          Set<String> seen) {
         List<XPathCandidate> out = new ArrayList<>();
         String selectedKey = selected.getKey();
 
-        // Root node (key="0") has no parent — can't build complex candidates.
+        // 根节点（key="0"）没有父节点 — 无法生成复杂候选。
         if (!selectedKey.contains("-")) return out;
 
-        // Find the parent by stripping the last index segment.
+        // 通过去掉最后一段索引找到父节点。
         String parentKey = selectedKey.substring(0, selectedKey.lastIndexOf('-'));
         HierarchyNode parent = nodeMap.get(parentKey);
         if (parent == null || parent.getChildren().isEmpty()) return out;
@@ -643,22 +635,22 @@ public class BestLocator {
         if (selectedIdx < 0) return out;
 
         String sName = selected.getName();
-        // 1-based position among siblings of the same class.
+        // 同级同类节点中的位次（1-based）。
         int sameClassPos = sameClassPosition(parent, selectedIdx, sName);
-        // Parent strategies that match exactly 1 node (unique anchors).
+        // 父节点唯一锚定策略（匹配数 == 1）。
         List<String[]> parentAnchors = uniqueAnchorXpaths(parent);
 
-        // ---- Type A: Parent-anchored ----
+        // ---- 类型 A: 父级锚定 ----
         for (String[] anchor : parentAnchors) {
-            String px = anchor[1];   // parent xpath
-            String by = anchor[0];  // parent by-type
+            String px = anchor[1];   // 父节点 xpath
+            String by = anchor[0];  // 父节点 by-type
 
-            // A1: any child at the specific index.
+            // A1: 父节点下任意子节点的索引定位。
             String childX = "(" + px + "/*[" + (selectedIdx + 1) + "])";
             addComplex(out, selectedKey, childX,
                     "parent_" + by + "_child_index", seen);
 
-            // A2: only same-class siblings at their own index.
+            // A2: 父节点下仅同类子节点的索引定位。
             String scX;
             if (isValidXmlName(sName)) {
                 scX = "(" + px + "/" + sName + ")[" + sameClassPos + "]";
@@ -670,17 +662,17 @@ public class BestLocator {
                     "parent_" + by + "_same_class_index", seen);
         }
 
-        // ---- Type B: Sibling-anchored ----
+        // ---- 类型 B: 同级锚定 ----
         for (int si = 0; si < parent.getChildren().size(); si++) {
             if (si == selectedIdx) continue;
 
             HierarchyNode sibling = parent.getChildren().get(si);
-            boolean isFollowing = si < selectedIdx;           // sibling before selected
+            boolean isFollowing = si < selectedIdx;           // 兄弟在目标节点之前
             String direction = isFollowing
                     ? "following-sibling" : "preceding-sibling";
             String suffix = isFollowing ? "following" : "preceding";
 
-            // Count same-class nodes between sibling and selected.
+            // 统计兄弟与目标之间有多少个同类节点。
             int betweenStart = isFollowing ? si + 1 : selectedIdx;
             int betweenEnd = isFollowing ? selectedIdx : si;
             int step = 0;
@@ -692,7 +684,7 @@ public class BestLocator {
 
             String axis = axisExpr(sName, direction);
 
-            // B1: use the sibling's own unique anchor as the base.
+            // B1: 以兄弟节点自身的唯一锚点为基础。
             for (String[] anchor : uniqueAnchorXpaths(sibling)) {
                 String xx = "(" + anchor[1] + "/" + axis + ")[" + step + "]";
                 addComplex(out, selectedKey, xx,
@@ -703,13 +695,12 @@ public class BestLocator {
     }
 
     /**
-     * Find XPath expressions that uniquely identify the given node.
+     * 查找能够唯一标识给定节点的 XPath 表达式。
      *
-     * <p>For each applicable strategy, build the XPath and check if it
-     * matches EXACTLY one node in the tree. Only unique XPaths are
-     * returned.</p>
+     * <p>对每个适用策略，构建 XPath 并检查在整棵树中是否恰好
+     * 匹配 1 个节点。仅返回唯一的 XPath。</p>
      *
-     * @return list of (byType, xpathExpression) pairs
+     * @return (byType, xpathExpression) 对列表
      */
     private List<String[]> uniqueAnchorXpaths(HierarchyNode node) {
         List<String[]> result = new ArrayList<>();
@@ -718,7 +709,7 @@ public class BestLocator {
             String xpath = buildXpathExpr(node, by);
             if (xpath.isEmpty() || seen.contains(xpath)) continue;
             List<HierarchyNode> matches = matchesBy(node, by);
-            if (matches.size() != 1) continue;    // must be unique
+            if (matches.size() != 1) continue;    // 必须唯一
             seen.add(xpath);
             result.add(new String[]{by, xpath});
         }
@@ -726,9 +717,9 @@ public class BestLocator {
     }
 
     /**
-     * Add a complex XPath candidate, avoiding duplicates.
-     * Complex candidates always use strategy="xpath" with matchCount=1
-     * (since they are structurally anchored).
+     * 向候选列表添加一个复杂 XPath 候选（去重）。
+     * 复杂候选统一使用 strategy="xpath"，matchCount=1
+     * （因为是结构锚定的，天然唯一）。
      */
     private void addComplex(List<XPathCandidate> sink, String key,
                             String xpath, String name, Set<String> seen) {
@@ -738,10 +729,10 @@ public class BestLocator {
     }
 
     // ================================================================
-    //  Mapping helpers (internal → output)
+    //  映射辅助函数（内部 → 输出）
     // ================================================================
 
-    /** Map internal strategy name to output locator type. */
+    /** 将内部策略名映射为输出定位器类型。 */
     private static String toLocatorType(String strategy) {
         switch (strategy) {
             case STRATEGY_CONTENT_DESC:
@@ -754,9 +745,8 @@ public class BestLocator {
     }
 
     /**
-     * Extract the actual property value for a given "by" type.
-     * This becomes candidate.propertyValue — the value returned to the
-     * caller as LocatorResult.value.
+     * 提取给定 "by" 类型对应的实际属性值。
+     * 成为 candidate.propertyValue — 最终返回给调用者的 LocatorResult.value。
      */
     private static String extractPropertyValue(HierarchyNode node, String by) {
         Map<String, String> p = node.getProperties();
@@ -771,7 +761,7 @@ public class BestLocator {
         }
     }
 
-    /** Map internal "by" type to output strategy name. */
+    /** 将内部 "by" 类型映射为输出策略名。 */
     private static String byToStrategy(String by) {
         switch (by) {
             case BY_ID: return STRATEGY_RESOURCE_ID;
@@ -785,25 +775,25 @@ public class BestLocator {
     }
 
     // ================================================================
-    //  XPath literal utilities
+    //  XPath 字面量工具函数
     // ================================================================
 
     /**
-     * Quote a string for use in XPath literal comparisons.
+     * 为 XPath 字面量对比中的字符串值加引号。
      *
-     * <p>Handles the edge case where a value contains BOTH double and
-     * single quotes by using XPath concat():</p>
+     * <p>处理属性值中同时包含双引号和单引号的边界情况，
+     * 必要时使用 XPath concat() 函数:</p>
      * <pre>
-     *   "hello"           → "hello"
-     *   it's              → "it's"
-     *   he said "hi"      → 'he said "hi"'
-     *   a"b'c             → concat("a", '"', "b'c")</pre>
+     *   "hello"     → "hello"         （使用双引号）
+     *   it's        → "it's"          （双引号包裹含单引号的值）
+     *   he said "hi"  → 'he said "hi"'  （单引号包裹含双引号的值）
+     *   a"b'c       → concat("a", '"', "b'c")  （同时含两种引号）</pre>
      */
     static String quoteXLiteral(String value) {
         if (value == null) return "\"\"";
         if (!value.contains("\"")) return "\"" + value + "\"";
         if (!value.contains("'")) return "'" + value + "'";
-        // Both quote types present — use concat() to join segments.
+        // 两种引号同时存在 — 使用 concat() 拼接各段。
         StringBuilder sb = new StringBuilder("concat(");
         String[] parts = value.split("\"");
         for (int i = 0; i < parts.length; i++) {
@@ -815,20 +805,20 @@ public class BestLocator {
     }
 
     /**
-     * Check if a string is a valid XML element name.
-     * Valid names start with a letter/underscore, then letters/digits/._/-
-     * Used to decide between tag selectors (//Button) and attribute
-     * selectors (//*[@class="foo.bar.Baz$Inner"]).
+     * 检查字符串是否为合法的 XML 元素名。
+     * 合法名称以字母/下划线开头，后续可为字母/数字/._/-
+     * 用于决定使用标签选择器 (//Button) 还是属性选择器
+     * (//*[@class="foo.bar.Baz$Inner"])。
      */
     static boolean isValidXmlName(String name) {
         return name != null && name.matches("^[A-Za-z_][A-Za-z0-9._-]*$");
     }
 
     // ================================================================
-    //  Tree/index utilities
+    //  树 / 索引工具函数
     // ================================================================
 
-    /** Find the position of a node by key within a list. -1 if not found. */
+    /** 在节点列表中按 key 查找位置，未找到返回 -1。 */
     private static int indexOfNode(List<HierarchyNode> nodes, String key) {
         for (int i = 0; i < nodes.size(); i++) {
             if (nodes.get(i).getKey().equals(key)) return i;
@@ -836,7 +826,7 @@ public class BestLocator {
         return -1;
     }
 
-    /** Find the index of a child node within its parent's children list. */
+    /** 在父节点的 children 列表中查找子节点索引。 */
     private static int childIndex(HierarchyNode parent, String childKey) {
         for (int i = 0; i < parent.getChildren().size(); i++) {
             if (parent.getChildren().get(i).getKey().equals(childKey)) return i;
@@ -845,8 +835,8 @@ public class BestLocator {
     }
 
     /**
-     * Count how many siblings up to selectedIdx have the same class name.
-     * Returns 1-based position. Used for "nth Button in parent" expressions.
+     * 统计到 selectedIdx 为止有多少个同类兄弟节点。
+     * 返回 1-based 位置。用于构建 "父节点下第n个Button" 表达式。
      */
     private static int sameClassPosition(HierarchyNode parent, int selectedIdx,
                                           String name) {
@@ -859,8 +849,8 @@ public class BestLocator {
     }
 
     /**
-     * Build an XPath axis expression, e.g. "following-sibling::Button"
-     * or "preceding-sibling::*[@class='CustomView']".
+     * 构建 XPath 轴表达式，如 "following-sibling::Button"
+     * 或 "preceding-sibling::*[@class='CustomView']"。
      */
     private static String axisExpr(String name, String axis) {
         if (isValidXmlName(name)) return axis + "::" + name;
@@ -868,13 +858,13 @@ public class BestLocator {
     }
 
     // ================================================================
-    //  General helpers
+    //  通用辅助函数
     // ================================================================
 
     /**
-     * Extract the effective node name from an XML element.
-     * For {@code <node class="Foo">}, the name is "Foo".
-     * For any other element, the name is the tag name itself.
+     * 从 XML 元素中提取有效节点名。
+     * 对 {@code <node class="Foo">}，名称为 "Foo"。
+     * 对其他元素，名称为标签名本身。
      */
     private static String resolveNodeName(Element el) {
         if ("node".equals(el.getTagName())) {
@@ -884,7 +874,7 @@ public class BestLocator {
         return el.getTagName();
     }
 
-    /** Read all attributes from an XML element into a LinkedHashMap. */
+    /** 读取 XML 元素的所有属性到 LinkedHashMap 中。 */
     private static LinkedHashMap<String, String> readProperties(Element el) {
         LinkedHashMap<String, String> props = new LinkedHashMap<>();
         NamedNodeMap attrs = el.getAttributes();
@@ -894,7 +884,7 @@ public class BestLocator {
         return props;
     }
 
-    /** Parse "[x1,y1][x2,y2]" into [x1, y1, x2, y2]. */
+    /** 将 "[x1,y1][x2,y2]" 解析为 [x1, y1, x2, y2]。 */
     private static List<Integer> parseBounds(String v) {
         List<Integer> bounds = new ArrayList<>();
         Matcher m = BOUNDS_PATTERN.matcher(v);
@@ -903,15 +893,15 @@ public class BestLocator {
     }
 
     /**
-     * Normalize a pixel coordinate to 0~1 range, rounded to 4 decimal places.
-     * This makes bounds resolution-independent.
+     * 将像素坐标归一化到 0~1 范围，保留 4 位小数。
+     * 使得 bounds 与分辨率无关。
      */
     private static double roundNorm(int value, int size) {
         if (size <= 0) return 0D;
         return Math.round((value * 1.0 / size) * 10000D) / 10000D;
     }
 
-    /** Join DFS path indices into a key string: [0,1,2] → "0-1-2". */
+    /** 将 DFS 路径索引拼接为 key 字符串: [0,1,2] → "0-1-2"。 */
     private static String joinIndexes(List<Integer> indexes) {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < indexes.size(); i++) {
@@ -921,17 +911,17 @@ public class BestLocator {
         return sb.toString();
     }
 
-    /** True if the string is non-null and non-empty. */
+    /** 字符串非 null 且非空时返回 true。 */
     private static boolean hasText(String s) {
         return s != null && !s.isEmpty();
     }
 
-    /** Convert null to empty string. */
+    /** null 转空字符串。 */
     private static String nullToEmpty(String s) {
         return s == null ? "" : s;
     }
 
-    /** Remove duplicates while preserving insertion order. */
+    /** 列表去重，保持插入顺序。 */
     private static <T> List<T> dedupe(List<T> items) {
         List<T> out = new ArrayList<>();
         Set<T> seen = new HashSet<>();
@@ -942,27 +932,31 @@ public class BestLocator {
     }
 
     // ================================================================
-    //  XPathCandidate — internal data class
+    //  XPathCandidate — 内部数据类
     // ================================================================
 
     /**
-     * One locator candidate produced by suggestXpath().
+     * suggestXpath() 生成的一个定位候选。
      *
-     * <p>Fields:</p>
+     * <p>字段说明:</p>
      * <ul>
-     *   <li><b>strategy</b> — internal name ("contentDesc", "resourceId", …)</li>
-     *   <li><b>propertyValue</b> — extracted property value, becomes
-     *       LocatorResult.value</li>
-     *   <li><b>xpath</b> — the generated XPath expression</li>
-     *   <li><b>matchCount</b> — how many nodes match (1 = unique)</li>
-     *   <li><b>selectedIndex</b> — position of target in matched list (0-based)</li>
+     *   <li><b>strategy</b> — 内部策略名（"contentDesc", "resourceId" 等）</li>
+     *   <li><b>propertyValue</b> — 提取的属性值，成为 LocatorResult.value</li>
+     *   <li><b>xpath</b> — 生成的 XPath 表达式</li>
+     *   <li><b>matchCount</b> — 匹配节点数（1 = 唯一）</li>
+     *   <li><b>selectedIndex</b> — 目标在匹配列表中的位置（0-based）</li>
      * </ul>
      */
     public static class XPathCandidate {
+        /** 内部策略名 */
         public final String strategy;
+        /** 提取的属性值 */
         public final String propertyValue;
+        /** XPath 表达式 */
         public final String xpath;
+        /** 匹配节点数 */
         public final int matchCount;
+        /** 目标在匹配列表中的位置 */
         public final int selectedIndex;
 
         XPathCandidate(String strategy, String propertyValue, String xpath,
