@@ -58,6 +58,11 @@ public class BestLocator {
     private Map<String, HierarchyNode> nodeMap;
     private List<HierarchyNode> allNodes;
     private String preferredXpath;
+    // pre-built property indexes for O(1) matchesBy
+    private Map<String, List<HierarchyNode>> byRid = new HashMap<>();
+    private Map<String, List<HierarchyNode>> byText = new HashMap<>();
+    private Map<String, List<HierarchyNode>> byCd = new HashMap<>();
+    private Map<String, List<HierarchyNode>> byClass = new HashMap<>();
 
     /**
      * Parse an XML string into the hierarchy.
@@ -195,6 +200,10 @@ public class BestLocator {
     private void buildIndex() {
         nodeMap = new LinkedHashMap<>();
         allNodes = new ArrayList<>();
+        byRid.clear();
+        byText.clear();
+        byCd.clear();
+        byClass.clear();
         indexRecursive(root);
     }
 
@@ -202,6 +211,22 @@ public class BestLocator {
         if (node == null) return;
         nodeMap.put(node.getKey(), node);
         allNodes.add(node);
+
+        Map<String, String> p = node.getProperties();
+        String rid = p.get("resource-id");
+        String text = p.get("text");
+        String cd = p.get("content-desc");
+        if (hasText(rid)) {
+            byRid.computeIfAbsent(rid, k -> new ArrayList<>()).add(node);
+        }
+        if (hasText(text)) {
+            byText.computeIfAbsent(text, k -> new ArrayList<>()).add(node);
+        }
+        if (hasText(cd)) {
+            byCd.computeIfAbsent(cd, k -> new ArrayList<>()).add(node);
+        }
+        byClass.computeIfAbsent(node.getName(), k -> new ArrayList<>()).add(node);
+
         if (node.getChildren() != null) {
             for (HierarchyNode child : node.getChildren()) {
                 indexRecursive(child);
@@ -266,43 +291,66 @@ public class BestLocator {
         return dedupe(out);
     }
 
-    // ── matches_by ──
+    // ── matches_by (O(1) via pre-built indexes) ──
 
     private List<HierarchyNode> matchesBy(HierarchyNode selected, String by) {
         Map<String, String> sp = selected.getProperties();
         String sName = selected.getName();
-        String sText = sp.get("text");
-        String sContentDesc = sp.get("content-desc");
-        String sResourceId = sp.get("resource-id");
 
-        List<HierarchyNode> matched = new ArrayList<>();
-        for (HierarchyNode node : allNodes) {
-            Map<String, String> np = node.getProperties();
-            switch (by) {
-                case BY_ID:
-                    if (Objects.equals(np.get("resource-id"), sResourceId)) matched.add(node);
-                    break;
-                case BY_TEXT:
-                    if (Objects.equals(np.get("text"), sText) && hasText(sText)) matched.add(node);
-                    break;
-                case BY_CONTENT_DESC:
-                    if (Objects.equals(np.get("content-desc"), sContentDesc)) matched.add(node);
-                    break;
-                case BY_CLASS:
-                    if (Objects.equals(node.getName(), sName)) matched.add(node);
-                    break;
-                case BY_CLASS_TEXT:
-                    if (Objects.equals(node.getName(), sName)
-                            && Objects.equals(np.get("text"), sText)
-                            && hasText(sText)) matched.add(node);
-                    break;
-                case BY_CLASS_CONTENT_DESC:
-                    if (Objects.equals(node.getName(), sName)
-                            && Objects.equals(np.get("content-desc"), sContentDesc)) matched.add(node);
-                    break;
+        switch (by) {
+            case BY_ID: {
+                String rid = sp.get("resource-id");
+                if (!hasText(rid)) return Collections.emptyList();
+                List<HierarchyNode> v = byRid.get(rid);
+                return v != null ? v : Collections.emptyList();
             }
+            case BY_TEXT: {
+                String text = sp.get("text");
+                if (!hasText(text)) return Collections.emptyList();
+                List<HierarchyNode> v = byText.get(text);
+                return v != null ? v : Collections.emptyList();
+            }
+            case BY_CONTENT_DESC: {
+                String cd = sp.get("content-desc");
+                if (!hasText(cd)) return Collections.emptyList();
+                List<HierarchyNode> v = byCd.get(cd);
+                return v != null ? v : Collections.emptyList();
+            }
+            case BY_CLASS: {
+                List<HierarchyNode> v = byClass.get(sName);
+                return v != null ? v : Collections.emptyList();
+            }
+            case BY_CLASS_TEXT: {
+                String text = sp.get("text");
+                if (!hasText(text)) return Collections.emptyList();
+                List<HierarchyNode> classNodes = byClass.get(sName);
+                if (classNodes == null) return Collections.emptyList();
+                List<HierarchyNode> textNodes = byText.get(text);
+                if (textNodes == null) return Collections.emptyList();
+                Set<HierarchyNode> textSet = new HashSet<>(textNodes);
+                List<HierarchyNode> result = new ArrayList<>();
+                for (HierarchyNode n : classNodes) {
+                    if (textSet.contains(n)) result.add(n);
+                }
+                return result;
+            }
+            case BY_CLASS_CONTENT_DESC: {
+                String cd = sp.get("content-desc");
+                if (!hasText(cd)) return Collections.emptyList();
+                List<HierarchyNode> classNodes = byClass.get(sName);
+                if (classNodes == null) return Collections.emptyList();
+                List<HierarchyNode> cdNodes = byCd.get(cd);
+                if (cdNodes == null) return Collections.emptyList();
+                Set<HierarchyNode> cdSet = new HashSet<>(cdNodes);
+                List<HierarchyNode> result = new ArrayList<>();
+                for (HierarchyNode n : classNodes) {
+                    if (cdSet.contains(n)) result.add(n);
+                }
+                return result;
+            }
+            default:
+                return Collections.emptyList();
         }
-        return matched;
     }
 
     // ── build_xpath ──
