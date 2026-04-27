@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 import xml.etree.ElementTree as ET
+from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
 
@@ -96,6 +97,10 @@ class BestLocator:
         self._root = _parse_hierarchy(xml_data, width, height)
         self._node_map: Dict[str, _HierarchyNode] = {}
         self._all_nodes: List[_HierarchyNode] = []
+        self._by_rid: Dict[str, List[_HierarchyNode]] = defaultdict(list)
+        self._by_text: Dict[str, List[_HierarchyNode]] = defaultdict(list)
+        self._by_cd: Dict[str, List[_HierarchyNode]] = defaultdict(list)
+        self._by_class: Dict[str, List[_HierarchyNode]] = defaultdict(list)
         self._preferred_xpath: str = ""
         self._build_index()
 
@@ -157,10 +162,25 @@ class BestLocator:
     def _build_index(self) -> None:
         self._node_map = {}
         self._all_nodes = []
+        self._by_rid.clear()
+        self._by_text.clear()
+        self._by_cd.clear()
+        self._by_class.clear()
 
         def walk(node: _HierarchyNode) -> None:
             self._node_map[node.key] = node
             self._all_nodes.append(node)
+            p = node.properties
+            rid = p.get("resource-id", "")
+            text = p.get("text", "")
+            cd = p.get("content-desc", "")
+            if rid:
+                self._by_rid[rid].append(node)
+            if text:
+                self._by_text[text].append(node)
+            if cd:
+                self._by_cd[cd].append(node)
+            self._by_class[node.name].append(node)
             for child in node.children:
                 walk(child)
 
@@ -196,31 +216,38 @@ class BestLocator:
         candidates.extend(self._build_complex_candidates(selected, seen))
         return candidates
 
-    # ── matches_by ──
+    # ── matches_by (O(1) via pre-built indexes) ──
 
     def _matches_by(self, selected: _HierarchyNode, by: str) -> List[_HierarchyNode]:
         sp = selected.properties
         s_name = selected.name
-        s_text = sp.get("text")
-        s_cd = sp.get("content-desc")
-        s_rid = sp.get("resource-id")
 
-        matched: List[_HierarchyNode] = []
-        for node in self._all_nodes:
-            np = node.properties
-            if by == _BY_ID and np.get("resource-id") == s_rid:
-                matched.append(node)
-            elif by == _BY_TEXT and np.get("text") == s_text and s_text:
-                matched.append(node)
-            elif by == _BY_CONTENT_DESC and np.get("content-desc") == s_cd:
-                matched.append(node)
-            elif by == _BY_CLASS and node.name == s_name:
-                matched.append(node)
-            elif by == _BY_CLASS_TEXT and node.name == s_name and np.get("text") == s_text and s_text:
-                matched.append(node)
-            elif by == _BY_CLASS_CONTENT_DESC and node.name == s_name and np.get("content-desc") == s_cd:
-                matched.append(node)
-        return matched
+        if by == _BY_ID:
+            rid = sp.get("resource-id", "")
+            return self._by_rid.get(rid, []) if rid else []
+        if by == _BY_TEXT:
+            text = sp.get("text", "")
+            return self._by_text.get(text, []) if text else []
+        if by == _BY_CONTENT_DESC:
+            cd = sp.get("content-desc", "")
+            return self._by_cd.get(cd, []) if cd else []
+        if by == _BY_CLASS:
+            return self._by_class.get(s_name, [])
+        if by == _BY_CLASS_TEXT:
+            text = sp.get("text", "")
+            if not text:
+                return []
+            class_nodes = self._by_class.get(s_name, [])
+            text_nodes = set(self._by_text.get(text, []))
+            return [n for n in class_nodes if n in text_nodes]
+        if by == _BY_CLASS_CONTENT_DESC:
+            cd = sp.get("content-desc", "")
+            if not cd:
+                return []
+            class_nodes = self._by_class.get(s_name, [])
+            cd_nodes = set(self._by_cd.get(cd, []))
+            return [n for n in class_nodes if n in cd_nodes]
+        return []
 
     # ── complex candidates ──
 
