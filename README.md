@@ -1,8 +1,9 @@
 # bestLocateFromXmlHierarchy
 
+对于自动化测试，获取元素的最佳定位永远是最基础的，由此针对安卓提出以下简单算法：
 输入 Android UIAutomator 层级 XML，对任意节点**自动推断最佳定位器**。
+补充：获取层级可用：adb shell uiautomator dump /data/local/tmp/uidump.xml
 
-算法源自 [uiautodev](https://github.com/nicepkg/uiautodev) 的 `suggest_xpath()` + `resolveLocatorByPriorityFast()` 流程。
 
 [English version](README_EN.md)
 
