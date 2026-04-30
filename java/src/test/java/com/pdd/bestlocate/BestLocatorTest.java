@@ -180,7 +180,7 @@ public class BestLocatorTest {
         // Check there's a content-desc candidate
         boolean hasCD = false;
         for (BestLocator.XPathCandidate xc : cands) {
-            if ("contentDesc".equals(xc.strategy)) { hasCD = true; break; }
+            if (xc.locateType == LocateType.CONTENT_DESC) { hasCD = true; break; }
         }
         assertTrue("should have content-desc candidate", hasCD);
     }

@@ -46,16 +46,6 @@ public class BestLocator {
     private static final Pattern XML_BOUNDS_PATTERN =
             Pattern.compile("\\[(\\d+),(\\d+)\\]\\[(\\d+),(\\d+)\\]");
 
-    // ---- 策略名（内部使用，用于排序和优先级比较） ----
-    private static final String STRATEGY_CONTENT_DESC = "contentDesc";
-    private static final String STRATEGY_RESOURCE_ID = "resourceId";
-    private static final String STRATEGY_TEXT = "text";
-    private static final String STRATEGY_CLASS_TEXT = "classText";
-    private static final String STRATEGY_CLASS_CONTENT_DESC = "classContentDesc";
-    private static final String STRATEGY_CLASS = "class";
-    /** 复杂候选的兜底策略。 */
-    private static final String STRATEGY_XPATH = "xpath";
-
     // ---- 输出定位器类型（返回到 LocatorResult.type） ----
     /** Accessibility ID / content-desc — 最快最稳定。 */
     private static final String TYPE_CONTENT_DESC = "content_desc";
@@ -158,15 +148,15 @@ public class BestLocator {
 
         // 阶段4: resolveLocatorByPriorityFast()。
         // 固定优先级链 — 首个 propertyValue 非空的候选即胜出。
-        String[] priorityOrder = {
-                STRATEGY_CONTENT_DESC, STRATEGY_RESOURCE_ID, STRATEGY_TEXT,
-                STRATEGY_CLASS_TEXT, STRATEGY_CLASS_CONTENT_DESC, STRATEGY_CLASS
+        LocateType[] priorityOrder = {
+                LocateType.CONTENT_DESC, LocateType.RESOURCE_ID, LocateType.TEXT,
+                LocateType.DESCRIPTION, LocateType.CLASS
         };
 
-        for (String strat : priorityOrder) {
+        for (LocateType type : priorityOrder) {
             for (XPathCandidate xc : candidates) {
-                if (strat.equals(xc.strategy) && !xc.propertyValue.isEmpty()) {
-                    return new LocatorResult(toLocatorType(xc.strategy), xc.propertyValue);
+                if (type == xc.locateType && !xc.propertyValue.isEmpty()) {
+                    return new LocatorResult(toLocatorType(xc.locateType), xc.propertyValue);
                 }
             }
         }
@@ -402,7 +392,7 @@ public class BestLocator {
             }
             String pv = extractPropertyValue(selected, by);
             candidates.add(new XPathCandidate(
-                    byToStrategy(by), pv, xpath, matches.size(), idx));
+                    byToLocateType(by), pv, xpath, matches.size(), idx));
             if (!xpath.isEmpty()) seen.add(xpath);
         }
 
@@ -718,30 +708,23 @@ public class BestLocator {
 
     /**
      * 向候选列表添加一个复杂 XPath 候选（去重）。
-     * 复杂候选统一使用 strategy="xpath"，matchCount=1
+     * 复杂候选统一使用 locateType=LocateType.XPATH，matchCount=1
      * （因为是结构锚定的，天然唯一）。
      */
     private void addComplex(List<XPathCandidate> sink, String key,
                             String xpath, String name, Set<String> seen) {
         if (xpath.isEmpty() || seen.contains(xpath)) return;
         seen.add(xpath);
-        sink.add(new XPathCandidate(STRATEGY_XPATH, xpath, xpath, 1, 0));
+        sink.add(new XPathCandidate(LocateType.XPATH, xpath, xpath, 1, 0));
     }
 
     // ================================================================
     //  映射辅助函数（内部 → 输出）
     // ================================================================
 
-    /** 将内部策略名映射为输出定位器类型。 */
-    private static String toLocatorType(String strategy) {
-        switch (strategy) {
-            case STRATEGY_CONTENT_DESC:
-            case STRATEGY_CLASS_CONTENT_DESC: return TYPE_CONTENT_DESC;
-            case STRATEGY_RESOURCE_ID: return TYPE_RESOURCE_ID;
-            case STRATEGY_TEXT:
-            case STRATEGY_CLASS_TEXT: return TYPE_TEXT;
-            default: return TYPE_XPATH;
-        }
+    /** 将内部定位枚举映射为输出定位器类型。 */
+    private static String toLocatorType(LocateType locateType) {
+        return locateType == null ? TYPE_XPATH : locateType.getResultType();
     }
 
     /**
@@ -761,16 +744,16 @@ public class BestLocator {
         }
     }
 
-    /** 将内部 "by" 类型映射为输出策略名。 */
-    private static String byToStrategy(String by) {
+    /** 将内部 "by" 类型映射为定位类型。 */
+    private static LocateType byToLocateType(String by) {
         switch (by) {
-            case BY_ID: return STRATEGY_RESOURCE_ID;
-            case BY_TEXT: return STRATEGY_TEXT;
-            case BY_CONTENT_DESC: return STRATEGY_CONTENT_DESC;
-            case BY_CLASS: return STRATEGY_CLASS;
-            case BY_CLASS_TEXT: return STRATEGY_CLASS_TEXT;
-            case BY_CLASS_CONTENT_DESC: return STRATEGY_CLASS_CONTENT_DESC;
-            default: return STRATEGY_XPATH;
+            case BY_ID: return LocateType.RESOURCE_ID;
+            case BY_TEXT:
+            case BY_CLASS_TEXT: return LocateType.TEXT;
+            case BY_CONTENT_DESC: return LocateType.CONTENT_DESC;
+            case BY_CLASS: return LocateType.CLASS;
+            case BY_CLASS_CONTENT_DESC: return LocateType.DESCRIPTION;
+            default: return LocateType.XPATH;
         }
     }
 
@@ -940,7 +923,7 @@ public class BestLocator {
      *
      * <p>字段说明:</p>
      * <ul>
-     *   <li><b>strategy</b> — 内部策略名（"contentDesc", "resourceId" 等）</li>
+     *   <li><b>locateType</b> — 定位类型（resource-id、content-desc 等）</li>
      *   <li><b>propertyValue</b> — 提取的属性值，成为 LocatorResult.value</li>
      *   <li><b>xpath</b> — 生成的 XPath 表达式</li>
      *   <li><b>matchCount</b> — 匹配节点数（1 = 唯一）</li>
@@ -948,8 +931,8 @@ public class BestLocator {
      * </ul>
      */
     public static class XPathCandidate {
-        /** 内部策略名 */
-        public final String strategy;
+        /** 定位类型 */
+        public final LocateType locateType;
         /** 提取的属性值 */
         public final String propertyValue;
         /** XPath 表达式 */
@@ -959,9 +942,9 @@ public class BestLocator {
         /** 目标在匹配列表中的位置 */
         public final int selectedIndex;
 
-        XPathCandidate(String strategy, String propertyValue, String xpath,
+        XPathCandidate(LocateType locateType, String propertyValue, String xpath,
                        int matchCount, int selectedIndex) {
-            this.strategy = strategy;
+            this.locateType = locateType;
             this.propertyValue = propertyValue;
             this.xpath = xpath;
             this.matchCount = matchCount;
@@ -970,7 +953,7 @@ public class BestLocator {
 
         @Override
         public String toString() {
-            return "XC{strategy=" + strategy + ", pv='" + propertyValue
+            return "XC{locateType=" + locateType.getValue() + ", pv='" + propertyValue
                     + "', xpath=" + xpath + ", matches=" + matchCount
                     + ", idx=" + selectedIndex + "}";
         }

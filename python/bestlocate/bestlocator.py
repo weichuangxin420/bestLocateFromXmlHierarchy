@@ -25,6 +25,7 @@ from __future__ import annotations
 import re
 import xml.etree.ElementTree as ET
 from collections import defaultdict
+from enum import Enum
 from typing import Dict, List, Optional, Tuple
 
 
@@ -46,6 +47,29 @@ class LocatorResult:
 
     def __repr__(self) -> str:
         return f"LocatorResult(type='{self.type}', value='{self.value}')"
+
+
+class LocateType(str, Enum):
+    """Supported locator categories inferred from Android UIAutomator XML."""
+
+    RESOURCE_ID = "resource-id"
+    CONTENT_DESC = "content-desc"
+    TEXT = "text"
+    CLASS = "class"
+    XPATH = "xpath"
+    DESCRIPTION = "description"
+
+    @property
+    def result_type(self) -> str:
+        """Backward-compatible LocatorResult.type value."""
+        return {
+            LocateType.RESOURCE_ID: "resource_id",
+            LocateType.CONTENT_DESC: "content_desc",
+            LocateType.TEXT: "text",
+            LocateType.CLASS: "xpath",
+            LocateType.XPATH: "xpath",
+            LocateType.DESCRIPTION: "content_desc",
+        }[self]
 
 
 # ================================================================
@@ -77,7 +101,7 @@ class _XPathCandidate:
     """
     suggest_xpath() 生成的一个定位候选。
 
-    strategy       - 内部策略名，如 "contentDesc", "resourceId"
+    locate_type    - 定位类型，如 LocateType.CONTENT_DESC
                      （在 best_locate 中映射为输出 type）
     property_value - 该策略提取到的属性值，
                      如 resource-id 候选的 "com.example:id/btn"
@@ -89,13 +113,13 @@ class _XPathCandidate:
 
     def __init__(
         self,
-        strategy: str,
+        locate_type: LocateType,
         property_value: str,
         xpath: str,
         match_count: int,
         selected_index: int,
     ) -> None:
-        self.strategy = strategy
+        self.locate_type = locate_type
         self.property_value = property_value
         self.xpath = xpath
         self.match_count = match_count
@@ -103,7 +127,7 @@ class _XPathCandidate:
 
     def __repr__(self) -> str:
         return (
-            f"XC(strategy={self.strategy}, pv='{self.property_value}', "
+            f"XC(locate_type={self.locate_type.value}, pv='{self.property_value}', "
             f"xpath={self.xpath}, matches={self.match_count}, idx={self.selected_index})"
         )
 
@@ -111,16 +135,6 @@ class _XPathCandidate:
 # ================================================================
 #  常量定义
 # ================================================================
-
-# 策略名（内部使用，用于排序和优先级比较）。
-# 这些是 "by" 类型映射到人类可读的策略标签。
-_STRATEGY_CONTENT_DESC = "contentDesc"
-_STRATEGY_RESOURCE_ID = "resourceId"
-_STRATEGY_TEXT = "text"
-_STRATEGY_CLASS_TEXT = "classText"
-_STRATEGY_CLASS_CONTENT_DESC = "classContentDesc"
-_STRATEGY_CLASS = "class"
-_STRATEGY_XPATH = "xpath"               # 复杂候选的兜底策略
 
 # 输出定位器类型（返回给调用者，对应 LocatorResult.type）。
 # 命名遵循 Android accessibility / Appium 惯例。
@@ -219,19 +233,18 @@ class BestLocator:
         # 固定优先级链 —— 首个 property_value 非空的候选即返回。
         # 与 uiautodev 的 resolveLocatorByPriorityFast() 完全一致。
         priority = [
-            _STRATEGY_CONTENT_DESC,
-            _STRATEGY_RESOURCE_ID,
-            _STRATEGY_TEXT,
-            _STRATEGY_CLASS_TEXT,
-            _STRATEGY_CLASS_CONTENT_DESC,
-            _STRATEGY_CLASS,
+            LocateType.CONTENT_DESC,
+            LocateType.RESOURCE_ID,
+            LocateType.TEXT,
+            LocateType.DESCRIPTION,
+            LocateType.CLASS,
         ]
 
-        for strat in priority:
+        for locate_type in priority:
             for xc in candidates:
-                if xc.strategy == strat and xc.property_value:
+                if xc.locate_type == locate_type and xc.property_value:
                     return LocatorResult(
-                        _to_locator_type(xc.strategy), xc.property_value
+                        _to_locator_type(xc.locate_type), xc.property_value
                     )
 
         # 如果简单候选都没命中，兜底用首选 XPath。
@@ -355,7 +368,7 @@ class BestLocator:
                 xpath = f"({xpath})[{idx + 1}]"
             pv = _extract_property_value(selected, by)
             candidates.append(
-                _XPathCandidate(_by_to_strategy(by), pv, xpath, len(matches), idx)
+                _XPathCandidate(_by_to_locate_type(by), pv, xpath, len(matches), idx)
             )
             if xpath:
                 seen.add(xpath)
@@ -757,27 +770,21 @@ def _extract_property_value(node: _HierarchyNode, by: str) -> str:
     }.get(by, "")
 
 
-def _by_to_strategy(by: str) -> str:
-    """将内部 "by" 类型映射为输出策略名。"""
+def _by_to_locate_type(by: str) -> LocateType:
+    """将内部 "by" 类型映射为定位类型。"""
     return {
-        _BY_ID: _STRATEGY_RESOURCE_ID,
-        _BY_TEXT: _STRATEGY_TEXT,
-        _BY_CONTENT_DESC: _STRATEGY_CONTENT_DESC,
-        _BY_CLASS: _STRATEGY_CLASS,
-        _BY_CLASS_TEXT: _STRATEGY_CLASS_TEXT,
-        _BY_CLASS_CONTENT_DESC: _STRATEGY_CLASS_CONTENT_DESC,
-    }.get(by, _STRATEGY_XPATH)
+        _BY_ID: LocateType.RESOURCE_ID,
+        _BY_TEXT: LocateType.TEXT,
+        _BY_CONTENT_DESC: LocateType.CONTENT_DESC,
+        _BY_CLASS: LocateType.CLASS,
+        _BY_CLASS_TEXT: LocateType.TEXT,
+        _BY_CLASS_CONTENT_DESC: LocateType.DESCRIPTION,
+    }.get(by, LocateType.XPATH)
 
 
-def _to_locator_type(strategy: str) -> str:
-    """将内部策略名映射为输出定位器类型。"""
-    if strategy in (_STRATEGY_CONTENT_DESC, _STRATEGY_CLASS_CONTENT_DESC):
-        return _TYPE_CONTENT_DESC
-    if strategy == _STRATEGY_RESOURCE_ID:
-        return _TYPE_RESOURCE_ID
-    if strategy in (_STRATEGY_TEXT, _STRATEGY_CLASS_TEXT):
-        return _TYPE_TEXT
-    return _TYPE_XPATH
+def _to_locator_type(locate_type: LocateType) -> str:
+    """将内部定位枚举映射为输出定位器类型。"""
+    return locate_type.result_type if locate_type else _TYPE_XPATH
 
 
 def _resolve_name(el: ET.Element) -> str:
@@ -853,13 +860,13 @@ def _add_complex(
 ) -> None:
     """
     向候选列表中添加一个复杂 XPath 候选（去重）。
-    复杂候选统一使用 strategy="xpath"，match_count=1
+    复杂候选统一使用 locate_type=LocateType.XPATH，match_count=1
     （因为是结构锚定的，天然唯一）。
     """
     if not xpath or xpath in seen:
         return
     seen.add(xpath)
-    sink.append(_XPathCandidate(_STRATEGY_XPATH, xpath, xpath, 1, 0))
+    sink.append(_XPathCandidate(LocateType.XPATH, xpath, xpath, 1, 0))
 
 
 def _dedupe(items: List[str]) -> List[str]:

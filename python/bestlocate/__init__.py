@@ -1,3 +1,3 @@
-from .bestlocator import BestLocator, LocatorResult
+from .bestlocator import BestLocator, LocateType, LocatorResult
 
-__all__ = ["BestLocator", "LocatorResult"]
+__all__ = ["BestLocator", "LocateType", "LocatorResult"]

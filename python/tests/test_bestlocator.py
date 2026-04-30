@@ -6,7 +6,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from bestlocate import BestLocator, LocatorResult
+from bestlocate import BestLocator, LocateType, LocatorResult
 
 EXAMPLE_XML = os.path.join(
     os.path.dirname(__file__), "..", "..", "example.xml"
@@ -129,7 +129,7 @@ class TestBestLocator(unittest.TestCase):
         for xc in cands:
             print(f"  {xc}")
 
-        has_cd = any(xc.strategy == "contentDesc" for xc in cands)
+        has_cd = any(xc.locate_type == LocateType.CONTENT_DESC for xc in cands)
         self.assertTrue(has_cd, "should have content-desc candidate")
 
     def test_root_node_fallback(self) -> None:
