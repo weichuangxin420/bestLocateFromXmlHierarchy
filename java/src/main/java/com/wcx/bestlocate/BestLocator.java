@@ -219,10 +219,6 @@ public class BestLocator {
     private static HierarchyNode parseHierarchy(String xml, int width, int height) {
         try {
             DocumentBuilderFactory f = DocumentBuilderFactory.newInstance();
-            f.setExpandEntityReferences(false);
-            f.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
-            f.setFeature("http://xml.org/sax/features/external-general-entities", false);
-            f.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
             Document doc = f.newDocumentBuilder().parse(new InputSource(new StringReader(xml)));
             // 根元素是 <hierarchy>；第一个子元素是第一个 <node>。
             return parseElement(doc.getDocumentElement(), width, height,
