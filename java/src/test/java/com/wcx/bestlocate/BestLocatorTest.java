@@ -1,4 +1,4 @@
-package com.pdd.bestlocate;
+package com.wcx.bestlocate;
 
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -192,6 +192,9 @@ public class BestLocatorTest {
         LocatorResult r = locator.bestLocate(rootKey);
         assertNotNull(r);
         assertFalse(r.getValue().isEmpty());
+        assertEquals("xpath", r.getType());
+        assertTrue("xpath value should be an xpath expression",
+                r.getValue().startsWith("//") || r.getValue().startsWith("("));
         System.out.println("Root node result: " + r);
     }
 
@@ -243,6 +246,10 @@ public class BestLocatorTest {
             try {
                 LocatorResult r = locator.bestLocate(key);
                 if (r != null && !r.getValue().isEmpty()) {
+                    if ("xpath".equals(r.getType())) {
+                        assertTrue("xpath value should be an xpath expression for key=" + key,
+                                r.getValue().startsWith("//") || r.getValue().startsWith("("));
+                    }
                     succeeded++;
                 } else {
                     failed++;

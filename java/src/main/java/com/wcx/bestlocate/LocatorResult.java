@@ -1,4 +1,4 @@
-package com.pdd.bestlocate;
+package com.wcx.bestlocate;
 
 /** Final locator result (type + value). */
 public class LocatorResult {

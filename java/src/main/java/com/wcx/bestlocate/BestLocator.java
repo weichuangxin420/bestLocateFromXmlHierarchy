@@ -1,4 +1,4 @@
-package com.pdd.bestlocate;
+package com.wcx.bestlocate;
 
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
@@ -74,8 +74,6 @@ public class BestLocator {
     private Map<String, HierarchyNode> nodeMap;
     /** 前序遍历的全部节点（扁平列表）。 */
     private List<HierarchyNode> allNodes;
-    /** 缓存的首选 XPath，用作 bestLocate() 的兜底。 */
-    private String preferredXpath;
 
     /**
      * 属性倒排索引 — 在 buildIndex() 中构建，
@@ -155,15 +153,17 @@ public class BestLocator {
 
         for (LocateType type : priorityOrder) {
             for (XPathCandidate xc : candidates) {
-                if (type == xc.locateType && !xc.propertyValue.isEmpty()) {
-                    return new LocatorResult(toLocatorType(xc.locateType), xc.propertyValue);
+                String value = resolveCandidateValue(xc);
+                if (type == xc.locateType && !value.isEmpty()) {
+                    return new LocatorResult(toLocatorType(xc.locateType), value);
                 }
             }
         }
 
         // 兜底1: 首选 XPath（最唯一的简单策略）。
-        if (!preferredXpath.isEmpty()) {
-            return new LocatorResult(TYPE_XPATH, preferredXpath);
+        String fallbackXpath = firstCandidateXpath(candidates);
+        if (!fallbackXpath.isEmpty()) {
+            return new LocatorResult(TYPE_XPATH, fallbackXpath);
         }
 
         // 兜底2: 最后的最后。
@@ -367,16 +367,6 @@ public class BestLocator {
         List<String> byCandidates = getAnchorByCandidates(selected);
         byCandidates.sort(Comparator.comparingInt(
                 by -> matchesBy(selected, by).size()));
-
-        // 首个（最唯一）策略即为"首选"。
-        String preferredBy = byCandidates.isEmpty() ? BY_CLASS : byCandidates.get(0);
-        this.preferredXpath = buildXpathExpr(selected, preferredBy);
-        List<HierarchyNode> prefMatches = matchesBy(selected, preferredBy);
-        int prefIdx = indexOfNode(prefMatches, selected.getKey());
-        // 如果不是第一个匹配节点，追加位置索引: (//expr)[n]。
-        if (!preferredXpath.isEmpty() && prefIdx > 0) {
-            preferredXpath = "(" + preferredXpath + ")[" + (prefIdx + 1) + "]";
-        }
 
         // 步骤 3: 为每个适用策略构建候选。
         List<XPathCandidate> candidates = new ArrayList<>();
@@ -725,6 +715,29 @@ public class BestLocator {
     /** 将内部定位枚举映射为输出定位器类型。 */
     private static String toLocatorType(LocateType locateType) {
         return locateType == null ? TYPE_XPATH : locateType.getResultType();
+    }
+
+    /**
+     * 返回候选实际对外暴露的值。
+     * CLASS 在 LocatorResult 中仍作为 xpath 兜底返回，因此值必须使用 XPath 表达式。
+     */
+    private static String resolveCandidateValue(XPathCandidate candidate) {
+        if (candidate == null) return "";
+        if (candidate.locateType == LocateType.CLASS) {
+            return nullToEmpty(candidate.xpath);
+        }
+        return nullToEmpty(candidate.propertyValue);
+    }
+
+    /** 返回第一个非空候选 XPath，用作最终兜底。 */
+    private static String firstCandidateXpath(List<XPathCandidate> candidates) {
+        if (candidates == null) return "";
+        for (XPathCandidate candidate : candidates) {
+            if (candidate != null && hasText(candidate.xpath)) {
+                return candidate.xpath;
+            }
+        }
+        return "";
     }
 
     /**

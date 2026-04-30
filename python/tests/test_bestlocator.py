@@ -137,6 +137,11 @@ class TestBestLocator(unittest.TestCase):
         result = self.locator.best_locate(root_key)
         self.assertIsNotNone(result)
         self.assertTrue(result.value)
+        self.assertEqual("xpath", result.type)
+        self.assertTrue(
+            result.value.startswith("//") or result.value.startswith("("),
+            "xpath value should be an xpath expression",
+        )
         print(f"Root node result: {result}")
 
     def test_nonexistent_key(self) -> None:
@@ -168,6 +173,11 @@ class TestBestLocator(unittest.TestCase):
             try:
                 result = self.locator.best_locate(key)
                 if result and result.value:
+                    if result.type == "xpath":
+                        self.assertTrue(
+                            result.value.startswith("//") or result.value.startswith("("),
+                            f"xpath value should be an xpath expression for key={key}",
+                        )
                     succeeded += 1
                 else:
                     failed += 1

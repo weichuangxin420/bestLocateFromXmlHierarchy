@@ -1,4 +1,4 @@
-package com.pdd.bestlocate;
+package com.wcx.bestlocate;
 
 /** Rectangle with position and size (in pixels). */
 public class HierarchyRect {

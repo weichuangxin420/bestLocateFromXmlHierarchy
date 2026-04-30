@@ -1,4 +1,4 @@
-package com.pdd.bestlocate;
+package com.wcx.bestlocate;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -10,9 +10,9 @@ public class HierarchyNode {
     private String key;
     private String name;
     private Map<String, String> properties = new LinkedHashMap<>();
-    private List<Double> bounds; // [x1, y1, x2, y2] normalized 0~1
-    private HierarchyRect rect;  // {x, y, width, height} in pixels
-    private List<HierarchyNode> children = new ArrayList<>();
+    private List<Double> bounds; // [x1, y1, x2, y2] 归一化的相对坐标
+    private HierarchyRect rect;  // {x, y, width, height} 像素层面的绝对坐标，单位pixel
+    private List<HierarchyNode> children = new ArrayList<>();//子节点
 
     public String getKey() { return key; }
     public void setKey(String key) { this.key = key; }

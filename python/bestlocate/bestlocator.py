@@ -50,18 +50,29 @@ class LocatorResult:
 
 
 class LocateType(str, Enum):
-    """Supported locator categories inferred from Android UIAutomator XML."""
+    """
+    从 Android UIAutomator XML 中可推断出的定位类型。
 
+    枚举值表示 XML / UiSelector 语义下的定位分类名；
+    result_type 表示对外兼容的 LocatorResult.type 返回值。
+    """
+
+    # XML 属性 resource-id，对应 Appium id / UiSelector.resourceId。
     RESOURCE_ID = "resource-id"
+    # XML 属性 content-desc，对应 Appium accessibility id。
     CONTENT_DESC = "content-desc"
+    # XML 属性 text，对应 UiSelector.text 或 XPath @text。
     TEXT = "text"
+    # XML 属性 class，对应 Appium class name；通常不唯一，更多作为兜底候选。
     CLASS = "class"
+    # 基于 XML 层级构造的 XPath 表达式。
     XPATH = "xpath"
+    # UiSelector.description 语义，对应 XML 的 content-desc。
     DESCRIPTION = "description"
 
     @property
     def result_type(self) -> str:
-        """Backward-compatible LocatorResult.type value."""
+        """对外兼容的 LocatorResult.type 返回值。"""
         return {
             LocateType.RESOURCE_ID: "resource_id",
             LocateType.CONTENT_DESC: "content_desc",
@@ -194,9 +205,6 @@ class BestLocator:
         self._by_cd: Dict[str, List[_HierarchyNode]] = defaultdict(list)
         self._by_class: Dict[str, List[_HierarchyNode]] = defaultdict(list)
 
-        # 阶段2c: 缓存首选 XPath（用作兜底）。
-        self._preferred_xpath: str = ""
-
         self._build_index()
 
     @classmethod
@@ -242,14 +250,16 @@ class BestLocator:
 
         for locate_type in priority:
             for xc in candidates:
-                if xc.locate_type == locate_type and xc.property_value:
+                value = _resolve_candidate_value(xc)
+                if xc.locate_type == locate_type and value:
                     return LocatorResult(
-                        _to_locator_type(xc.locate_type), xc.property_value
+                        _to_locator_type(xc.locate_type), value
                     )
 
         # 如果简单候选都没命中，兜底用首选 XPath。
-        if self._preferred_xpath:
-            return LocatorResult(_TYPE_XPATH, self._preferred_xpath)
+        preferred_xpath = _first_candidate_xpath(candidates)
+        if preferred_xpath:
+            return LocatorResult(_TYPE_XPATH, preferred_xpath)
 
         # 最后的最后。
         fallback = candidates[0].xpath if candidates else ""
@@ -345,15 +355,6 @@ class BestLocator:
         # 步骤 1 & 2: 获取候选策略，按匹配数升序排列（越少越好）。
         by_candidates = _get_anchor_by_candidates(selected)
         by_candidates.sort(key=lambda by: len(self._matches_by(selected, by)))
-
-        # 首个（最唯一）策略即为"首选"。
-        preferred_by = by_candidates[0] if by_candidates else _BY_CLASS
-        self._preferred_xpath = _build_xpath_expr(selected, preferred_by)
-        pref_matches = self._matches_by(selected, preferred_by)
-        pref_idx = _index_of(pref_matches, selected.key)
-        # 如果不是第一个匹配节点，追加位置索引: (//expr)[n]。
-        if self._preferred_xpath and pref_idx > 0:
-            self._preferred_xpath = f"({self._preferred_xpath})[{pref_idx + 1}]"
 
         seen: set = set()
         candidates: List[_XPathCandidate] = []
@@ -785,6 +786,24 @@ def _by_to_locate_type(by: str) -> LocateType:
 def _to_locator_type(locate_type: LocateType) -> str:
     """将内部定位枚举映射为输出定位器类型。"""
     return locate_type.result_type if locate_type else _TYPE_XPATH
+
+
+def _resolve_candidate_value(candidate: _XPathCandidate) -> str:
+    """
+    返回候选实际对外暴露的值。
+    CLASS 在 LocatorResult 中仍作为 xpath 兜底返回，因此值必须使用 XPath 表达式。
+    """
+    if candidate.locate_type == LocateType.CLASS:
+        return candidate.xpath or ""
+    return candidate.property_value or ""
+
+
+def _first_candidate_xpath(candidates: List[_XPathCandidate]) -> str:
+    """返回第一个非空候选 XPath，用作最终兜底。"""
+    for candidate in candidates:
+        if candidate.xpath:
+            return candidate.xpath
+    return ""
 
 
 def _resolve_name(el: ET.Element) -> str:

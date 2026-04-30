@@ -234,7 +234,7 @@ Run tests:
 cd bestLocateFromXmlHierarchy
 mvn compile test-compile
 java -cp "target/classes:target/test-classes:..." org.junit.runner.JUnitCore \
-     com.pdd.bestlocate.BestLocatorTest
+     com.wcx.bestlocate.BestLocatorTest
 
 # Python
 python -m pytest python/tests/test_bestlocator.py -v
